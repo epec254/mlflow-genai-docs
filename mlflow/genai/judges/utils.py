@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import warnings
 from dataclasses import asdict, is_dataclass
 
 import mlflow
@@ -27,7 +28,7 @@ def get_default_model() -> str:
         return "openai:/gpt-4.1-mini"
 
 
-def format_prompt(prompt: str, **values) -> str:
+def format_prompt(prompt: str, **values: object) -> str:
     """Format double-curly variables in the prompt template."""
     for key, value in values.items():
         prompt = re.sub(r"\{\{\s*" + key + r"\s*\}\}", str(value), prompt)
@@ -113,6 +114,20 @@ def _is_litellm_available() -> bool:
         return False
 
 
+def _call_litellm_completion(model_uri, messages, tools, response_format):
+    """Helper function to call litellm completion that can be decorated with retry."""
+    import litellm
+    
+    response = litellm.completion(
+        model=model_uri,
+        messages=messages,
+        tools=tools if tools else None,
+        tool_choice="auto" if tools else None,
+        response_format=response_format,
+    )
+    return response
+
+
 def _invoke_litellm(provider: str, model_name: str, prompt: str, trace: Trace | None) -> str:
     """Invoke the judge model via litellm."""
     import litellm
@@ -120,6 +135,24 @@ def _invoke_litellm(provider: str, model_name: str, prompt: str, trace: Trace | 
     from mlflow.genai.judges.tools import list_judge_tools
     from mlflow.genai.judges.tools.registry import _judge_tool_registry
     from mlflow.types.llm import ToolCall
+    
+    # Try to import retry library
+    try:
+        from retry import retry
+        
+        # Decorate the completion function with retry for RateLimitError
+        _retryable_completion = retry(
+            exceptions=litellm.exceptions.RateLimitError,
+            tries=5,
+            delay=1,
+            backoff=2,
+            max_delay=60,
+            logger=_logger
+        )(_call_litellm_completion)
+    except ImportError:
+        # Fallback to no retry if library not available
+        _logger.debug("retry library not available, rate limit errors will not be retried")
+        _retryable_completion = _call_litellm_completion
 
     litellm_model_uri = f"{provider}/{model_name}"
     messages = [{"role": "user", "content": prompt}]
@@ -157,62 +190,62 @@ def _invoke_litellm(provider: str, model_name: str, prompt: str, trace: Trace | 
     while True:
         try:
             _logger.debug(f"Calling LiteLLM with {len(messages)} messages and {len(tools)} tools")
-            response = litellm.completion(
-                model=litellm_model_uri,
-                messages=messages,
-                tools=tools if tools else None,
-                tool_choice="auto" if tools else None,
-                response_format=response_format,
+            response = _retryable_completion(
+                litellm_model_uri,
+                messages,
+                tools,
+                response_format
             )
-            message = response.choices[0].message
-            if not message.tool_calls:
-                _logger.debug("No tool calls in response, returning final content")
-                return message.content
-
-            _logger.debug(f"Model requested {len(message.tool_calls)} tool calls")
-            messages.append(message.model_dump())
-            for tool_call in message.tool_calls:
-                try:
-                    _logger.debug(
-                        f"Invoking judge tool: {tool_call.function.name} with arguments: "
-                        f"{tool_call.function.arguments}"
-                    )
-                    mlflow_tool_call = ToolCall(
-                        id=tool_call.id,
-                        function={
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    )
-                    result = _judge_tool_registry.invoke(mlflow_tool_call, trace)
-                    _logger.debug(f"Tool {tool_call.function.name} completed successfully")
-                except Exception as e:
-                    _logger.debug(f"Tool {tool_call.function.name} failed with error: {e}")
-                    messages.append(
-                        {
-                            "tool_call_id": tool_call.id,
-                            "role": "tool",
-                            "name": tool_call.function.name,
-                            "content": f"Error: {e!s}",
-                        }
-                    )
-                else:
-                    # Convert dataclass results to dict if needed
-                    # The tool result is either a dict, string, or dataclass
-                    if is_dataclass(result):
-                        result = asdict(result)
-                    result_json = json.dumps(result) if not isinstance(result, str) else result
-                    _logger.debug(f"Tool {tool_call.function.name} result: {result_json}")
-                    messages.append(
-                        {
-                            "tool_call_id": tool_call.id,
-                            "role": "tool",
-                            "name": tool_call.function.name,
-                            "content": result_json,
-                        }
-                    )
         except Exception as e:
             raise MlflowException(f"Failed to invoke the judge model via litellm: {e}") from e
+        
+        message = response.choices[0].message
+        if not message.tool_calls:
+            _logger.debug("No tool calls in response, returning final content")
+            return message.content
+
+        _logger.debug(f"Model requested {len(message.tool_calls)} tool calls")
+        messages.append(message.model_dump())
+        for tool_call in message.tool_calls:
+            try:
+                _logger.debug(
+                    f"Invoking judge tool: {tool_call.function.name} with arguments: "
+                    f"{tool_call.function.arguments}"
+                )
+                mlflow_tool_call = ToolCall(
+                    id=tool_call.id,
+                    function={
+                        "name": tool_call.function.name,
+                        "arguments": tool_call.function.arguments,
+                    },
+                )
+                result = _judge_tool_registry.invoke(mlflow_tool_call, trace)
+                _logger.debug(f"Tool {tool_call.function.name} completed successfully")
+            except Exception as e:
+                _logger.debug(f"Tool {tool_call.function.name} failed with error: {e}")
+                messages.append(
+                    {
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": tool_call.function.name,
+                        "content": f"Error: {e!s}",
+                    }
+                )
+            else:
+                # Convert dataclass results to dict if needed
+                # The tool result is either a dict, string, or dataclass
+                if is_dataclass(result):
+                    result = asdict(result)
+                result_json = json.dumps(result) if not isinstance(result, str) else result
+                _logger.debug(f"Tool {tool_call.function.name} result: {result_json}")
+                messages.append(
+                    {
+                        "tool_call_id": tool_call.id,
+                        "role": "tool",
+                        "name": tool_call.function.name,
+                        "content": result_json,
+                    }
+                )
 
 
 class CategoricalRating(StrEnum):
