@@ -10,6 +10,7 @@ import re
 from dataclasses import dataclass
 
 from mlflow.entities.trace import Trace
+from mlflow.tracing.fluent import trace
 from mlflow.genai.judges.tools.base import JudgeTool
 from mlflow.types.llm import ToolDefinition
 
@@ -93,6 +94,7 @@ class SearchTraceRegexTool(JudgeTool):
             },
         )
 
+    @trace(span_type="TOOL")
     def invoke(
         self, trace: Trace, pattern: str, context_chars: int = 100, max_matches: int = 100
     ) -> SearchTraceRegexResult:

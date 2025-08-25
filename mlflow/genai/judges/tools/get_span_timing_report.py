@@ -8,6 +8,7 @@ and concurrency.
 from collections import defaultdict
 
 from mlflow.entities.trace import Trace
+from mlflow.tracing.fluent import trace
 from mlflow.genai.judges.tools.base import JudgeTool
 from mlflow.types.llm import FunctionToolDefinition, ToolDefinition, ToolParamsSchema
 from mlflow.utils.annotations import experimental
@@ -50,6 +51,7 @@ class GetSpanTimingReportTool(JudgeTool):
             type="function",
         )
 
+    @trace(span_type="TOOL")
     def invoke(self, trace: Trace) -> str:
         """
         Generate span timing report for the trace.

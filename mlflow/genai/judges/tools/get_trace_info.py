@@ -5,6 +5,7 @@ This module provides a tool for retrieving trace metadata including
 timing, location, state, and other high-level information.
 """
 
+from mlflow.tracing.fluent import trace
 from mlflow.entities.trace import Trace
 from mlflow.entities.trace_info import TraceInfo
 from mlflow.genai.judges.tools.base import JudgeTool
@@ -47,7 +48,7 @@ class GetTraceInfoTool(JudgeTool):
             ),
             type="function",
         )
-
+    @trace(span_type="TOOL")
     def invoke(self, trace: Trace) -> TraceInfo | None:
         """
         Get metadata about the trace.

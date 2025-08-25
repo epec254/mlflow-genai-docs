@@ -9,6 +9,7 @@ from dataclasses import dataclass
 
 from mlflow.entities.span_status import SpanStatus
 from mlflow.entities.trace import Trace
+from mlflow.tracing.fluent import trace
 from mlflow.genai.judges.tools.base import JudgeTool
 from mlflow.types.llm import (
     FunctionToolDefinition,
@@ -87,6 +88,7 @@ class ListSpansTool(JudgeTool):
             type="function",
         )
 
+    @trace(span_type="TOOL")
     def invoke(
         self, trace: Trace, max_results: int = 100, page_token: str | None = None
     ) -> ListSpansResult:

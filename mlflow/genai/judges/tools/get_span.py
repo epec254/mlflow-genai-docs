@@ -8,6 +8,7 @@ import json
 from dataclasses import dataclass
 
 from mlflow.entities.trace import Trace
+from mlflow.tracing.fluent import trace
 from mlflow.genai.judges.tools.base import JudgeTool
 from mlflow.types.llm import FunctionToolDefinition, ToolDefinition, ToolParamsSchema
 from mlflow.utils.annotations import experimental
@@ -80,6 +81,7 @@ class GetSpanTool(JudgeTool):
             type="function",
         )
 
+    @trace(span_type="TOOL")
     def invoke(
         self,
         trace: Trace,
